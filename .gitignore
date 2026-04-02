@@ -1,0 +1,29 @@
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# 数据文件（不上传原始数据）
+data/*.db
+raw/*.csv
+
+# 输出报告
+outputs/
+
+# 日志 & PID
+logs/*.log
+logs/*.pid
+
+# 系统文件
+.DS_Store
+.idea/
+.vscode/
+
+# 保留空目录占位符
+!raw/.gitkeep
+!data/.gitkeep
+!outputs/.gitkeep
+!logs/.gitkeep
