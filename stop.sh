@@ -1,6 +1,6 @@
 
 #!/usr/bin/env bash
-# pmflow 停止脚本
+# pm-flow 停止脚本
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"

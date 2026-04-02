@@ -16,7 +16,7 @@ from pipeline.report import build_report
 from ingest.douyin_csv_to_sqlite import ensure_schema, ingest_posts, ingest_comments
 
 # ── 常量 ───────────────────────────────────────────────
-DB_PATH = ROOT_DIR / "data" / "pmflow.db"
+DB_PATH = ROOT_DIR / "data" / "pm-flow.db"
 RAW_DIR = ROOT_DIR / "raw"
 OUT_DIR = ROOT_DIR / "outputs"
 
@@ -271,7 +271,7 @@ nav_items = {
 
 cols = st.columns([1.2] + [1] * len(nav_items))
 with cols[0]:
-    st.markdown("<span style='font-size:1rem;font-weight:700;line-height:2.4;'>📋 pmflow</span>",
+    st.markdown("<span style='font-size:1rem;font-weight:700;line-height:2.4;'>📋 pm-flow</span>",
                 unsafe_allow_html=True)
 for i, (key, label) in enumerate(nav_items.items()):
     with cols[i + 1]:
@@ -290,7 +290,7 @@ page = st.session_state.page
 # 概览
 # ════════════════════════════════════════════════════
 if page == "overview":
-    st.markdown('<p class="pg-title">pmflow</p>', unsafe_allow_html=True)
+    st.markdown('<p class="pg-title">pm-flow</p>', unsafe_allow_html=True)
     st.markdown('<p class="pg-sub">竞品分析数据工作台 · 本地离线版</p>', unsafe_allow_html=True)
 
     st.markdown(f"""

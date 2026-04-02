@@ -3,7 +3,7 @@
 import sqlite3
 from typing import Optional
 
-DB_PATH = "data/pmflow.db"
+DB_PATH = "data/pm-flow.db"
 
 
 def get_conn(db_path: str = DB_PATH) -> sqlite3.Connection:

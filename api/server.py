@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 # ── 路径配置（所有路径都基于项目根目录）─────────────────────
 ROOT_DIR    = Path(__file__).parent.parent        # /Users/macbook/pm flow/
-DB_PATH     = ROOT_DIR / "data" / "pmflow.db"
+DB_PATH     = ROOT_DIR / "data" / "pm-flow.db"
 RAW_DIR     = ROOT_DIR / "raw"                    # CSV 原始数据目录
 OUTPUTS_DIR = ROOT_DIR / "outputs"
 CRAWLER_DIR = ROOT_DIR / "media_crawler"          # MediaCrawler 根目录
@@ -35,7 +35,7 @@ from ingest.douyin_csv_to_sqlite import (
 os.makedirs(str(DB_PATH.parent), exist_ok=True)
 os.makedirs(str(OUTPUTS_DIR), exist_ok=True)
 
-app = FastAPI(title="pmflow API", version="2.0.0")
+app = FastAPI(title="pm-flow API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -208,7 +208,7 @@ def _ingest_latest_csv(platform: str = "douyin") -> dict:
 @app.get("/")
 def root():
     return {
-        "service":  "pmflow API",
+        "service":  "pm-flow API",
         "version":  "2.0.0",
         "status":   "ok",
         "db":       str(DB_PATH),

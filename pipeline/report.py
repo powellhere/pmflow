@@ -6,7 +6,7 @@ from datetime import datetime
 from collections import Counter
 
 
-DB_PATH = "data/pmflow.db"
+DB_PATH = "data/pm-flow.db"
 
 # ── 情感词典（轻量版）─────────────────────────────────────
 POS_WORDS = {"好用","喜欢","推荐","优秀","棒","赞","牛","香","爱了","完美","方便","实惠","值得","舒服","耐用","满意","不错","超好","太好了","好评"}
@@ -211,8 +211,8 @@ def build_report(query: str, db_path=DB_PATH) -> str:
 
     # ── 封面
     L += [
-        f"# 📋 pmflow 舆情分析报告",
-        f"\n**🔑 关键词**：`{query}`　　**🕐 生成时间**：{now}　　**📦 数据来源**：抖音离线数据",
+        f"# 📋 pm-flow 舆情分析报告",
+        f"\n**🔑 关键词**：`{query}`　　**🕐 生成时间**：{now}　　**📦 数据来源**：平台离线数据",
         f"\n> 样本来自关键词检索（共 **{len(posts)}** 条内容 / **{len(comments)}** 条评论），非全量数据，结论仅供参考。",
         "\n---",
     ]
@@ -338,7 +338,7 @@ def build_report(query: str, db_path=DB_PATH) -> str:
     # ── 尾部
     L += [
         "\n---",
-        "\n> 📌 **报告由 pmflow MCP 自动生成** | 数据仅来源于本地抖音离线样本",
+        "\n> 📌 **报告由 pm-flow MCP 自动生成** | 数据仅来源于本地平台离线样本",
     ]
 
     return "\n".join(L)
@@ -350,7 +350,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--query", default="续火花")
-    parser.add_argument("--db",    default="data/pmflow.db")
+    parser.add_argument("--db",    default="data/pm-flow.db")
     parser.add_argument("--out",   default="outputs")
     args = parser.parse_args()
 

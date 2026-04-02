@@ -1,7 +1,7 @@
 
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────
-# pmflow 一键启动脚本（后台守护版）
+# pm-flow 一键启动脚本（后台守护版）
 # 用法：bash start.sh [--skip-ingest]
 # ─────────────────────────────────────────────
 
@@ -14,7 +14,7 @@ VENV_ST="$SCRIPT_DIR/.venv/bin/streamlit"
 
 API_PORT=8000
 UI_PORT=8501
-DB_PATH="$SCRIPT_DIR/data/pmflow.db"
+DB_PATH="$SCRIPT_DIR/data/pm-flow.db"
 RAW_DIR="$SCRIPT_DIR/raw"
 LOG_DIR="$SCRIPT_DIR/logs"
 

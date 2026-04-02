@@ -176,7 +176,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--contents", required=True, help="path to search_contents_*.csv")
     parser.add_argument("--comments", required=True, help="path to search_comments_*.csv")
-    parser.add_argument("--db", default="data/pmflow.db")
+    parser.add_argument("--db", default="data/pm-flow.db")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.db), exist_ok=True)

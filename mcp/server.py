@@ -9,16 +9,16 @@ from pipeline.retrieve import fetch_bundle
 from pipeline.report import build_report
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH  = os.path.join(BASE_DIR, "data", "pmflow.db")
+DB_PATH  = os.path.join(BASE_DIR, "data", "pm-flow.db")
 OUT_DIR  = os.path.join(BASE_DIR, "outputs")
 
-mcp = FastMCP("pmflow")
+mcp = FastMCP("pm-flow")
 
 
 @mcp.tool()
 def retrieve(query: str, post_limit: int = 20, comment_limit: int = 50) -> dict:
     """
-    根据关键词从本地抖音数据库召回相关内容和评论。
+    根据关键词从本地平台数据库召回相关内容和评论。
     返回 posts 列表、评论字典和基础统计。
     """
     return fetch_bundle(
@@ -72,7 +72,7 @@ def top_comments(query: str, n: int = 10) -> list:
 @mcp.tool()
 def get_post_list(query: str) -> list:
     """
-    返回关键词下所有匹配的抖音内容列表，
+    返回关键词下所有匹配的平台内容列表，
     包含标题、评论数、点赞数、分享数、链接。
     """
     bundle = fetch_bundle(query, db_path=DB_PATH)
