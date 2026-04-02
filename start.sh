@@ -96,7 +96,7 @@ sleep 2
 # ── 启动成功提示 ──────────────────────────────
 echo ""
 echo -e "${GREEN}════════════════════════════════════════${NC}"
-echo -e "${GREEN}  🚀 pmflow 已在后台启动${NC}"
+echo -e "${GREEN}  🚀 竞品分析工作台 已在后台启动${NC}"
 echo -e "${GREEN}════════════════════════════════════════${NC}"
 echo -e "  📊 UI   → ${GREEN}http://localhost:$UI_PORT${NC}"
 echo -e "  🔌 API  → ${GREEN}http://localhost:$API_PORT${NC}"

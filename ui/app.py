@@ -24,7 +24,7 @@ OUT_DIR = ROOT_DIR / "outputs"
 # 页面配置
 # ════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="pmflow",
+    page_title="竞品分析工作台",
     page_icon="📋",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -291,7 +291,7 @@ page = st.session_state.page
 # ════════════════════════════════════════════════════
 if page == "overview":
     st.markdown('<p class="pg-title">pmflow</p>', unsafe_allow_html=True)
-    st.markdown('<p class="pg-sub">抖音舆情分析工作台 · 本地离线版</p>', unsafe_allow_html=True)
+    st.markdown('<p class="pg-sub">竞品分析数据工作台 · 本地离线版</p>', unsafe_allow_html=True)
 
     st.markdown(f"""
     <div class="stat-row">

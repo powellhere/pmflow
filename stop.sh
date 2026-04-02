@@ -27,4 +27,4 @@ done
 pkill -f "uvicorn api.server:app"  2>/dev/null && info "已清理残留 API 进程" || true
 pkill -f "streamlit run ui/app.py" 2>/dev/null && info "已清理残留 UI 进程"  || true
 
-echo -e "${GREEN}✅ pmflow 已完全停止${NC}"
+echo -e "${GREEN}✅ 竞品分析工作台 已完全停止${NC}"
