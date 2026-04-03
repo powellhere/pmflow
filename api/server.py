@@ -1,391 +1,387 @@
 
-# api/server.py
+"""
+FastAPI 后端
+启动方式：cd ~/pmflow && uvicorn api.server:app --reload
+"""
+
 import os
 import sys
-import glob
-import asyncio
+import uuid
 import sqlite3
-from datetime import datetime
+import subprocess
+import threading
+import shutil
+import re
 from pathlib import Path
-from typing import Optional
+from typing import List
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-# ── 路径配置（所有路径都基于项目根目录）─────────────────────
-ROOT_DIR    = Path(__file__).parent.parent        # /Users/macbook/pm flow/
-DB_PATH     = ROOT_DIR / "data" / "pm-flow.db"
-RAW_DIR     = ROOT_DIR / "raw"                    # CSV 原始数据目录
-OUTPUTS_DIR = ROOT_DIR / "outputs"
-CRAWLER_DIR = ROOT_DIR / "media_crawler"          # MediaCrawler 根目录
+# ════════════════════════════════════════════════════
+# 常量
+# ════════════════════════════════════════════════════
 
-# ── 把项目根目录加入 Python 路径，才能 import pipeline/ingest ─
+ROOT_DIR             = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from pipeline.report   import build_report
-from pipeline.retrieve import fetch_bundle
-from ingest.douyin_csv_to_sqlite import (
-    ensure_schema,
-    ingest_posts,
-    ingest_comments,
-)
+MEDIA_CRAWLER_DIR    = Path.home() / "MediaCrawler"
+MEDIA_CRAWLER_PYTHON = MEDIA_CRAWLER_DIR / ".venv" / "bin" / "python"
+DB_PATH              = ROOT_DIR / "data" / "pmflow.db"
+RAW_DIR              = ROOT_DIR / "raw"
 
-# ── 确保目录存在 ──────────────────────────────────────────
-os.makedirs(str(DB_PATH.parent), exist_ok=True)
-os.makedirs(str(OUTPUTS_DIR), exist_ok=True)
-
-app = FastAPI(title="pm-flow API", version="2.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── 任务状态（内存缓存）───────────────────────────────────
-tasks: dict[str, dict] = {}
-
-
-# ════════════════════════════════════════════════════════
-# Pydantic Schema
-# ════════════════════════════════════════════════════════
-
-class CrawlRequest(BaseModel):
-    keywords:     list[str]
-    platform:     str = "douyin"    # douyin / xhs / bilibili / weibo
-    max_posts:    int = 20
-    max_comments: int = 200
-    cookies:      Optional[str] = None
-
-
-class ReportRequest(BaseModel):
-    query:   str
-    db_path: Optional[str] = None
-
-
-class IngestRequest(BaseModel):
-    """手动触发：把 raw/ 目录最新 CSV 导入 SQLite"""
-    contents_csv: Optional[str] = None   # 不填则自动取最新
-    comments_csv: Optional[str] = None
-    platform:     str = "douyin"
-
-
-# ════════════════════════════════════════════════════════
-# 工具函数
-# ════════════════════════════════════════════════════════
-
-def _latest_csv(pattern: str) -> Optional[Path]:
-    """在 raw/ 目录找最新匹配的 CSV"""
-    files = sorted(glob.glob(str(RAW_DIR / pattern)))
-    return Path(files[-1]) if files else None
-
-
-def _log(task_id: str, msg: str):
-    ts = datetime.now().strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}"
-    tasks[task_id]["log"].append(line)
-    print(line)
-
-
-# ════════════════════════════════════════════════════════
-# 爬虫封装层（MediaCrawler subprocess）
-# ════════════════════════════════════════════════════════
-
-PLATFORM_MAP = {
-    "douyin":   "dy",
-    "xhs":      "xhs",
-    "bilibili": "bili",
-    "weibo":    "wb",
+# UI 传入的短名 → 目录用的全名
+PLATFORM_FULL_MAP = {
+    "bili":   "bilibili",
+    "xhs":    "xhs",
+    "dy":     "douyin",
+    "wb":     "weibo",
+    "ks":     "kuaishou",
+    "tieba":  "tieba",
+    "zhihu":  "zhihu",
 }
 
+STEP_LABELS = [
+    "初始化爬虫",
+    "登录平台",
+    "搜索关键词",
+    "抓取内容",
+    "抓取评论",
+    "保存 CSV",
+    "导入数据库",
+]
 
-def _write_cookies(platform: str, cookie_str: str):
-    """把 Cookie 写入 MediaCrawler 的配置"""
-    import json
-    cookie_path = CRAWLER_DIR / "config" / "accounts_cookies.json"
-    if not cookie_path.exists():
-        return
-    try:
-        with open(cookie_path, "r+", encoding="utf-8") as f:
-            data = json.load(f)
-            data[PLATFORM_MAP.get(platform, platform)] = cookie_str
-            f.seek(0)
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.truncate()
-    except Exception as e:
-        print(f"[WARN] 写入 cookie 失败：{e}")
+app = FastAPI()
+
+# ── 任务存储（内存，进程级） ──────────────────────────────
+TASKS: dict = {}
 
 
-async def _run_crawler_for_keyword(task_id: str, keyword: str, req: CrawlRequest):
-    """调用 MediaCrawler 爬取单个关键词"""
-    _log(task_id, f"开始爬取关键词：{keyword} （平台：{req.platform}）")
+# ════════════════════════════════════════════════════
+# Schema
+# ════════════════════════════════════════════════════
 
-    cmd = [
-        sys.executable, "main.py",
-        "--platform",       PLATFORM_MAP.get(req.platform, req.platform),
-        "--lt",             "cookie",
-        "--type",           "search",
-        "--keywords",       keyword,
-        "--max_note_count", str(req.max_posts),
-    ]
+class CrawlRequest(BaseModel):
+    keywords:         List[str]
+    platform:         str            # bili / xhs / dy / wb / ks / tieba / zhihu
+    login_type:       str  = "qrcode"
+    max_comments:     int  = 50
+    get_comment:      bool = True
+    get_sub_comment:  bool = False
+    save_data_option: str  = "csv"
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(CRAWLER_DIR),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await proc.communicate()
-        log_text = stdout.decode("utf-8", errors="ignore")
 
-        # 只保留最后 800 字符，避免日志过长
-        _log(task_id, log_text[-800:] if len(log_text) > 800 else log_text)
+# ════════════════════════════════════════════════════
+# 辅助函数
+# ════════════════════════════════════════════════════
 
-        if proc.returncode == 0:
-            _log(task_id, f"✅ {keyword} 爬取完成")
+def _make_steps(active_idx: int = 0, done_up_to: int = -1):
+    steps = []
+    for i, label in enumerate(STEP_LABELS):
+        if i <= done_up_to:
+            state = "done"
+        elif i == active_idx:
+            state = "active"
         else:
-            _log(task_id, f"❌ {keyword} 爬取失败 returncode={proc.returncode}")
-
-    except FileNotFoundError:
-        _log(task_id, f"❌ media_crawler/main.py 不存在，请检查 CRAWLER_DIR 路径")
-    except Exception as e:
-        _log(task_id, f"❌ 爬取异常：{e}")
+            state = "idle"
+        steps.append({"label": label, "state": state})
+    return steps
 
 
-async def run_crawler_task(task_id: str, req: CrawlRequest):
-    """后台任务：爬取 → 自动导入最新 CSV → done"""
-    tasks[task_id]["status"] = "running"
-
-    if req.cookies:
-        _write_cookies(req.platform, req.cookies)
-
-    # 1. 逐关键词爬取
-    for keyword in req.keywords:
-        await _run_crawler_for_keyword(task_id, keyword, req)
-
-    # 2. 爬完后自动导入最新 CSV
-    _log(task_id, "📥 开始导入最新 CSV 到 SQLite...")
-    try:
-        imported = _ingest_latest_csv(req.platform)
-        _log(task_id, f"✅ 导入完成：posts={imported['posts']}, comments={imported['comments']}")
-    except Exception as e:
-        _log(task_id, f"⚠️ CSV 导入失败：{e}")
-
-    tasks[task_id]["status"]      = "done"
-    tasks[task_id]["finished_at"] = datetime.now().isoformat()
-
-
-def _ingest_latest_csv(platform: str = "douyin") -> dict:
+def _patch_config(req: CrawlRequest):
     """
-    从 raw/ 目录找最新的 contents / comments CSV，
-    调用已有的 ingest 函数写入 SQLite。
+    把关键词 / 评论数等写入 MediaCrawler/config/base_config.py
+    兼容新旧版本的不同变量名。
     """
-    contents_csv = _latest_csv("search_contents_*.csv")
-    comments_csv = _latest_csv("search_comments_*.csv")
+    config_path = MEDIA_CRAWLER_DIR / "config" / "base_config.py"
+    if not config_path.exists():
+        return
 
-    if not contents_csv and not comments_csv:
-        raise FileNotFoundError(f"raw/ 目录下未找到 CSV 文件")
+    text = config_path.read_text(encoding="utf-8")
+    kw_str = '["' + '", "'.join(req.keywords) + '"]'
 
+    replacements = {
+        r'(KEYWORDS\s*=\s*)(\[.*?\]|".*?")':        rf'\g<1>{kw_str}',
+        r'(SEARCH_KEYWORDS\s*=\s*)(\[.*?\]|".*?")': rf'\g<1>{kw_str}',
+        r'(MAX_COMMENT_NUM\s*=\s*)\d+':             rf'\g<1>{req.max_comments}',
+        r'(CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES\s*=\s*)\d+': rf'\g<1>{req.max_comments}',
+        r'(ENABLE_GET_COMMENTS\s*=\s*)\w+':         rf'\g<1>{"True" if req.get_comment else "False"}',
+        r'(GET_COMMENT\s*=\s*)\w+':                 rf'\g<1>{"True" if req.get_comment else "False"}',
+        r'(SAVE_DATA_OPTION\s*=\s*)".*?"':          rf'\g<1>"{req.save_data_option}"',
+    }
+
+    for pattern, repl in replacements.items():
+        text = re.sub(pattern, repl, text)
+
+    config_path.write_text(text, encoding="utf-8")
+
+
+def _ingest_after_crawl(platform_short: str) -> dict:
+    """爬取完成后把 MediaCrawler 的 CSV 同步到 RAW_DIR 并导入 DB
+    
+    platform_short: 短平台名（bili / dy / xhs / wb / ks / tieba / zhihu）
+    """
+    from ingest.douyin_csv_to_sqlite import ensure_schema, ingest_posts, ingest_comments
+
+    # 根据短名生成所有可能的 MediaCrawler 数据目录名（兼容 bili/bilibili、dy/douyin 等）
+    PLATFORM_DIR_VARIANTS = {
+        "bili":   ["bili", "bilibili"],
+        "dy":     ["dy", "douyin"],
+        "ks":     ["ks", "kuaishou"],
+        "wb":     ["wb", "weibo"],
+        "xhs":    ["xhs"],
+        "tieba":  ["tieba"],
+        "zhihu":  ["zhihu"],
+    }
+    
+    dir_variants = PLATFORM_DIR_VARIANTS.get(platform_short, [platform_short])
+    
+    # 构建候选目录列表（优先级递减）
+    src_candidates = []
+    for variant in dir_variants:
+        src_candidates.extend([
+            MEDIA_CRAWLER_DIR / "data" / variant / "csv",
+            MEDIA_CRAWLER_DIR / "data" / variant,
+        ])
+    src_candidates.append(MEDIA_CRAWLER_DIR / "data")
+
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 从所有候选目录复制 CSV
+    copied_files = []
+    for src_dir in src_candidates:
+        if not src_dir.exists():
+            continue
+        for pattern in ["search_contents_*.csv", "search_videos_*.csv", "search_comments_*.csv"]:
+            for f in sorted(src_dir.glob(pattern)):
+                dest = RAW_DIR / f.name
+                shutil.copy2(str(f), str(dest))
+                copied_files.append(str(f))
+
+    # 找最新的 CSV
+    def latest(pat):
+        files = sorted(RAW_DIR.glob(pat))
+        return files[-1] if files else None
+
+    contents = latest("search_contents_*.csv") or latest("search_videos_*.csv")
+    comments = latest("search_comments_*.csv")
+
+    if not contents and not comments:
+        return {"posts": 0, "comments": 0}
+
+    # 导入到 DB
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     ensure_schema(conn)
-
-    n_posts    = ingest_posts(conn, str(contents_csv), platform=platform) if contents_csv else 0
-    n_comments = ingest_comments(conn, str(comments_csv), platform=platform) if comments_csv else 0
-
+    n_p = ingest_posts(conn, str(contents), platform=platform_short) if contents else 0
+    n_c = ingest_comments(conn, str(comments), platform=platform_short) if comments else 0
     conn.close()
-    return {"posts": n_posts, "comments": n_comments,
-            "contents_file": str(contents_csv),
-            "comments_file": str(comments_csv)}
+    return {"posts": n_p, "comments": n_c}
 
 
-# ════════════════════════════════════════════════════════
-# API Routes
-# ════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════
+# 核心：爬虫子线程
+# ════════════════════════════════════════════════════
 
-@app.get("/")
-def root():
-    return {
-        "service":  "pm-flow API",
-        "version":  "2.0.0",
-        "status":   "ok",
-        "db":       str(DB_PATH),
-        "raw_dir":  str(RAW_DIR),
-    }
+def _run_crawler(task_id: str, req: CrawlRequest):
+    """在子线程中执行 MediaCrawler，实时采集日志"""
+    task = TASKS[task_id]
+    platform_full = PLATFORM_FULL_MAP.get(req.platform, req.platform)
+
+    def log(msg: str):
+        task["log"].append(msg)
+
+    # ── Step 0: 写入配置文件 ──────────────────────────────
+    log(f"▶ 启动爬虫  平台={platform_full}  关键词={','.join(req.keywords)}")
+    task["steps"] = _make_steps(active_idx=0)
+    try:
+        _patch_config(req)
+        log("✓ 配置文件已更新")
+    except Exception as e:
+        log(f"⚠ 配置写入失败（继续运行）：{e}")
+
+    # ── 构建命令 ──────────────────────────────────────────
+    # MediaCrawler CLI 接受短名：xhs / dy / bili / wb / ks / tieba / zhihu
+    # req.platform 本身就是短名，直接用
+    cmd = [
+        str(MEDIA_CRAWLER_PYTHON), "main.py",
+        "--platform", req.platform,
+        "--lt", req.login_type,
+        "--type", "search",
+    ]
+
+    env = os.environ.copy()
+    env["KEYWORDS"]         = ",".join(req.keywords)
+    env["MAX_COMMENTS"]     = str(req.max_comments)
+    env["GET_COMMENT"]      = "1" if req.get_comment else "0"
+    env["GET_SUB_COMMENT"]  = "1" if req.get_sub_comment else "0"
+    env["SAVE_DATA_OPTION"] = req.save_data_option
+    env["PYTHONUNBUFFERED"]  = "1"
+
+    log(f"$ {' '.join(cmd)}")
+    task["steps"] = _make_steps(active_idx=0, done_up_to=0)
+
+    # ── 启动子进程 ────────────────────────────────────────
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(MEDIA_CRAWLER_DIR),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        task["process"] = proc
+
+        step_keywords = {
+            1: ["登录", "login", "扫码", "qrcode", "cookie", "已登录", "logged"],
+            2: ["搜索", "search", "keyword", "关键词"],
+            3: ["抓取", "crawl", "fetch", "视频", "笔记", "note", "video"],
+            4: ["评论", "comment"],
+            5: ["保存", "save", "csv", "写入", "finish"],
+        }
+        current_step = 0
+
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            log(line)
+            line_lower = line.lower()
+
+            for step_idx, kws in step_keywords.items():
+                if step_idx > current_step and any(k in line_lower for k in kws):
+                    current_step = step_idx
+                    task["steps"] = _make_steps(
+                        active_idx=current_step,
+                        done_up_to=current_step - 1,
+                    )
+                    break
+
+            if task["status"] == "stopped":
+                proc.terminate()
+                log("⏹ 用户手动停止")
+                return
+
+        proc.wait()
+        rc = proc.returncode
+
+        # ── 退出码处理 ────────────────────────────────────
+        csv_found = any(
+            list((MEDIA_CRAWLER_DIR / "data" / platform_full).glob("*.csv"))
+            if (MEDIA_CRAWLER_DIR / "data" / platform_full).exists() else []
+        ) or any(RAW_DIR.glob("search_contents_*.csv")) or any(RAW_DIR.glob("search_videos_*.csv"))
+
+        if rc != 0 and not csv_found and task["status"] != "stopped":
+            task["status"] = "error"
+            task["error"]  = f"进程退出码 {rc}，且未生成 CSV，请查看日志"
+            task["steps"]  = _make_steps(active_idx=-1, done_up_to=current_step - 1)
+            log(f"❌ 爬虫异常退出，退出码 {rc}")
+            return
+
+        if rc != 0:
+            log(f"⚠ 退出码 {rc}（已检测到 CSV，继续导入）")
+
+    except FileNotFoundError:
+        task["status"] = "error"
+        task["error"]  = f"找不到 MediaCrawler，请确认路径：{MEDIA_CRAWLER_DIR}"
+        log(f"❌ {task['error']}")
+        return
+    except Exception as e:
+        task["status"] = "error"
+        task["error"]  = str(e)
+        log(f"❌ 异常：{e}")
+        return
+
+    # ── 导入数据库 ─────────────────────────────────────────
+    log("⏳ 正在导入数据库…")
+    task["steps"] = _make_steps(active_idx=6, done_up_to=5)
+    try:
+        imported = _ingest_after_crawl(req.platform)  # 传短名
+        task["imported"] = imported
+        task["steps"]    = _make_steps(active_idx=-1, done_up_to=6)
+        log(f"✅ 导入完成  内容 {imported['posts']} 条 · 评论 {imported['comments']} 条")
+    except Exception as e:
+        task["imported"] = {"posts": 0, "comments": 0}
+        log(f"⚠️ 导入失败：{e}")
+
+    task["status"] = "done"
 
 
-# ── 爬取 ──────────────────────────────────────────────
+# ════════════════════════════════════════════════════
+# 路由
+# ════════════════════════════════════════════════════
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 
 @app.post("/crawl")
-async def crawl(req: CrawlRequest, bg: BackgroundTasks):
-    """发起爬取任务（后台异步执行）"""
-    task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    tasks[task_id] = {
+def start_crawl(req: CrawlRequest):
+    task_id = str(uuid.uuid4())[:8]
+    TASKS[task_id] = {
         "status":     "pending",
-        "keywords":   req.keywords,
-        "platform":   req.platform,
-        "created_at": datetime.now().isoformat(),
         "log":        [],
+        "platform":   req.platform,
+        "keywords":   req.keywords,
+        "login_type": req.login_type,
+        "steps":      _make_steps(active_idx=0),
+        "process":    None,
+        "imported":   None,
+        "error":      None,
     }
-    bg.add_task(run_crawler_task, task_id, req)
-    return {"task_id": task_id, "message": "爬取任务已启动，可通过 /crawl/{task_id} 查看进度"}
+
+    def _start():
+        TASKS[task_id]["status"] = "running"
+        _run_crawler(task_id, req)
+
+    t = threading.Thread(target=_start, daemon=True)
+    t.start()
+    return {"task_id": task_id}
 
 
 @app.get("/crawl/{task_id}")
-def crawl_status(task_id: str):
-    """查询爬取任务状态 + 日志"""
-    if task_id not in tasks:
-        raise HTTPException(404, f"任务 {task_id} 不存在")
-    return tasks[task_id]
+def get_task(task_id: str):
+    task = TASKS.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return {
+        "status":     task["status"],
+        "platform":   task["platform"],
+        "keywords":   task["keywords"],
+        "login_type": task["login_type"],
+        "steps":      task["steps"],
+        "log":        task["log"],
+        "imported":   task["imported"],
+        "error":      task["error"],
+    }
 
 
-@app.get("/tasks")
-def list_tasks():
-    """所有任务列表（不含详细日志）"""
-    return [
-        {k: v for k, v in task.items() if k != "log"}
-        | {"task_id": tid}
-        for tid, task in tasks.items()
+@app.post("/crawl/{task_id}/stop")
+def stop_task(task_id: str):
+    task = TASKS.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    task["status"] = "stopped"
+    proc = task.get("process")
+    if proc:
+        proc.terminate()
+    return {"ok": True}
+
+
+@app.get("/crawl/{task_id}/qrcode")
+def get_qrcode(task_id: str):
+    """返回 MediaCrawler 生成的二维码图片"""
+    qr_candidates = [
+        MEDIA_CRAWLER_DIR / "qrcode.png",
+        MEDIA_CRAWLER_DIR / "qr.png",
+        MEDIA_CRAWLER_DIR / "temp" / "qrcode.png",
+        MEDIA_CRAWLER_DIR / "browser_data" / "qrcode.png",
     ]
-
-
-# ── 手动导入 CSV ──────────────────────────────────────
-
-@app.post("/ingest")
-def ingest(req: IngestRequest = IngestRequest()):
-    """
-    手动触发：把 raw/ 目录最新 CSV 导入 SQLite。
-    不传参数时自动找最新文件。
-    """
-    try:
-        conn = sqlite3.connect(str(DB_PATH))
-        ensure_schema(conn)
-
-        contents_path = Path(req.contents_csv) if req.contents_csv else _latest_csv("search_contents_*.csv")
-        comments_path = Path(req.comments_csv) if req.comments_csv else _latest_csv("search_comments_*.csv")
-
-        if not contents_path and not comments_path:
-            raise HTTPException(400, "raw/ 目录下未找到 CSV 文件")
-
-        n_posts    = ingest_posts(conn, str(contents_path), platform=req.platform) if contents_path else 0
-        n_comments = ingest_comments(conn, str(comments_path), platform=req.platform) if comments_path else 0
-        conn.close()
-
-        return {
-            "ok":             True,
-            "posts_ingested": n_posts,
-            "comments_ingested": n_comments,
-            "contents_file":  str(contents_path),
-            "comments_file":  str(comments_path),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
-# ── 报告 ──────────────────────────────────────────────
-
-@app.post("/report")
-def report(req: ReportRequest):
-    """生成三模块分析报告，返回 Markdown 字符串"""
-    db = req.db_path or str(DB_PATH)
-    if not Path(db).exists():
-        raise HTTPException(400, f"数据库不存在：{db}，请先执行 /ingest")
-    try:
-        md = build_report(req.query, db_path=db)
-        # 同时保存到 outputs/
-        out_dir = OUTPUTS_DIR / req.query
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / f"report_{datetime.now().strftime('%Y-%m-%d')}.md"
-        out_file.write_text(md, encoding="utf-8")
-        return {"query": req.query, "report": md, "saved_to": str(out_file)}
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
-# ── 数据查询 ──────────────────────────────────────────
-
-@app.get("/posts")
-def list_posts(keyword: str = "", limit: int = 20):
-    """查询 posts 表"""
-    if not DB_PATH.exists():
-        return []
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    if keyword:
-        cur.execute("""
-            SELECT post_id, keyword, title, text, author_name,
-                   like_count, comment_count, share_count, collect_count,
-                   url, platform, ip_location
-            FROM posts
-            WHERE keyword LIKE ? OR title LIKE ? OR text LIKE ?
-            ORDER BY comment_count DESC LIMIT ?
-        """, (f"%{keyword}%",) * 3 + (limit,))
-    else:
-        cur.execute("""
-            SELECT post_id, keyword, title, text, author_name,
-                   like_count, comment_count, share_count, collect_count,
-                   url, platform, ip_location
-            FROM posts ORDER BY comment_count DESC LIMIT ?
-        """, (limit,))
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
-
-
-@app.get("/keywords")
-def list_keywords():
-    """已有关键词及数量"""
-    if not DB_PATH.exists():
-        return []
-    conn = sqlite3.connect(str(DB_PATH))
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT keyword, COUNT(*) as cnt
-        FROM posts
-        GROUP BY keyword
-        ORDER BY cnt DESC
-    """)
-    rows = [{"keyword": r[0], "count": r[1]} for r in cur.fetchall()]
-    conn.close()
-    return rows
-
-
-@app.get("/stats")
-def stats():
-    """数据库整体统计"""
-    if not DB_PATH.exists():
-        return {"posts": 0, "comments": 0, "keywords": 0}
-    conn = sqlite3.connect(str(DB_PATH))
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM posts")
-    n_posts = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM comments")
-    n_comments = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(DISTINCT keyword) FROM posts")
-    n_keywords = cur.fetchone()[0]
-    conn.close()
-    return {"posts": n_posts, "comments": n_comments, "keywords": n_keywords}
-
-
-@app.delete("/data/{keyword}")
-def delete_keyword(keyword: str):
-    """删除某关键词的全部 posts 和 comments"""
-    if not DB_PATH.exists():
-        raise HTTPException(400, "数据库不存在")
-    conn = sqlite3.connect(str(DB_PATH))
-    # 先找到这些 post 的 ID
-    cur = conn.cursor()
-    cur.execute("SELECT post_id FROM posts WHERE keyword = ?", (keyword,))
-    ids = [r[0] for r in cur.fetchall()]
-    if ids:
-        placeholders = ",".join("?" * len(ids))
-        conn.execute(f"DELETE FROM comments WHERE post_id IN ({placeholders})", ids)
-    conn.execute("DELETE FROM posts WHERE keyword = ?", (keyword,))
-    conn.commit()
-    conn.close()
-    return {"ok": True, "deleted_posts": len(ids), "keyword": keyword}
+    for p in qr_candidates:
+        if p.exists():
+            return FileResponse(str(p), media_type="image/png")
+    raise HTTPException(404, "QR code not ready yet")
